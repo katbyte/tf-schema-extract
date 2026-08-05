@@ -23,7 +23,7 @@ type FlagData struct {
 func configureFlags(root *cobra.Command) error {
 	pflags := root.PersistentFlags()
 
-	pflags.StringP("out", "o", "-", "output file for the schema JSON ('-' for stdout)")
+	pflags.StringP("out", "o", "", "output file for the schema JSON, '-' for stdout (default results/<provider>.<date>.<mode>.json)")
 	pflags.Bool("silent", false, "suppress all progress output")
 	pflags.BoolP("verbose", "v", false, "show detailed progress output")
 	pflags.Duration("timeout", 5*time.Minute, "timeout for schema extraction")

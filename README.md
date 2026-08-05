@@ -22,10 +22,13 @@ last, and tfschemaex implements all three so the difference can be measured dire
    `validation.IntBetween(1, 100)`.
 
 ```sh
-tfschemaex plugin ~/go/bin/terraform-provider-azurerm -o azurerm-plugin.json
-tfschemaex src ~/hashi/azure/azurerm -o azurerm-src.json
-tfschemaex src ~/hashi/azure/azurerm --ssa -o azurerm-full.json
+tfschemaex plugin ~/go/bin/terraform-provider-azurerm   # -> results/azurerm.<date>.binary.json
+tfschemaex src ~/hashi/azure/azurerm                    # -> results/azurerm.<date>.src.json
+tfschemaex src ~/hashi/azure/azurerm --ssa              # -> results/azurerm.<date>.src-ssa.json
 ```
+
+Dumps land in a self-gitignored `results/` directory by default (override with `-o`,
+`-o -` for stdout).
 
 ## what each rung of the ladder sees
 
@@ -150,7 +153,7 @@ tfschemaex version
 
 | flag              | env                  | description                                              |
 |-------------------|----------------------|----------------------------------------------------------|
-| `-o`, `--out`     | `TFSCHEMAEX_OUT`     | output file, `-` for stdout (default)                    |
+| `-o`, `--out`     | `TFSCHEMAEX_OUT`     | output file, `-` for stdout (default `results/<provider>.<date>.<mode>.json`) |
 | `--ssa`           | `TFSCHEMAEX_SSA`     | src mode: recover literal args via call-site analysis    |
 | `--entry`         | `TFSCHEMAEX_ENTRY`   | src mode: override the auto-detected entry point         |
 | `--keep-shim`     |                      | src mode: leave the generated shim behind to debug       |
@@ -158,8 +161,8 @@ tfschemaex version
 | `--silent`        | `TFSCHEMAEX_SILENT`  | suppress progress output                                 |
 | `-v`, `--verbose` |                      | detailed progress (entry point candidates, etc)          |
 
-Progress goes to stderr; only the JSON goes to stdout, so `tfschemaex plugin p > s.json`
-is always clean.
+Progress goes to stderr; with `-o -` only the JSON goes to stdout, so
+`tfschemaex plugin p -o - > s.json` is always clean.
 
 Src mode entry detection scans for exported constructor functions returning
 `*schema.Provider` (terraform-plugin-sdk v2) — with or without a `context.Context`

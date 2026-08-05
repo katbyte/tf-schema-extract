@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/katbyte/tfschemaex/lib/cout"
@@ -99,7 +101,7 @@ src mode against the provider's source for those.`,
 				Plugin:          dump,
 			}
 
-			return writeDump(out)
+			return writeDump(out, providerNameFromBinary(binary), "binary")
 		},
 	})
 
@@ -139,15 +141,15 @@ ambiguous matches list "call_candidates" instead.`,
 				return err
 			}
 
+			modRoot, modPath, err := src.FindModule(repo)
+			if err != nil {
+				return err
+			}
+
 			ssa := viper.GetBool("ssa")
 			if ssa {
-				root, modPath, err := src.FindModule(repo)
-				if err != nil {
-					return err
-				}
-
 				cout.Printf("  running --ssa call-site analysis...\n")
-				enriched, stats, err := enrich.Payload(payload, root, modPath)
+				enriched, stats, err := enrich.Payload(payload, modRoot, modPath)
 				if err != nil {
 					return err
 				}
@@ -169,7 +171,11 @@ ambiguous matches list "call_candidates" instead.`,
 				Src:           payload,
 			}
 
-			return writeDump(out)
+			mode := "src"
+			if ssa {
+				mode = "src-ssa"
+			}
+			return writeDump(out, strings.TrimPrefix(filepath.Base(modPath), "terraform-provider-"), mode)
 		},
 	})
 
@@ -180,19 +186,53 @@ ambiguous matches list "call_candidates" instead.`,
 	return root, nil
 }
 
-func writeDump(d *schemajson.Dump) error {
+// writeDump writes to --out, defaulting to results/<provider>.<date>.<mode>.json in a
+// self-gitignored results directory.
+func writeDump(d *schemajson.Dump, provider, mode string) error {
 	out := viper.GetString("out")
+	if out == "" {
+		if err := ensureResultsDir(); err != nil {
+			return err
+		}
+		out = filepath.Join("results", fmt.Sprintf("%s.%s.%s.json", provider, time.Now().Format("2006-01-02"), mode))
+	}
 
 	start := time.Now()
 	if err := d.WriteFile(out); err != nil {
 		return err
 	}
 
-	if out != "" && out != "-" {
+	if out != "-" {
 		if fi, err := os.Stat(out); err == nil {
 			cout.Printf("wrote <green>%s</> <gray>(%.1f MB in %s)</>\n", out, float64(fi.Size())/1024/1024, time.Since(start).Round(time.Millisecond))
 		}
 	}
 
 	return nil
+}
+
+// ensureResultsDir creates results/ with a .gitignore so dumps never end up committed.
+func ensureResultsDir() error {
+	if err := os.MkdirAll("results", 0o755); err != nil { //nolint:gosec // a browsable output dir, not sensitive
+		return fmt.Errorf("creating results dir: %w", err)
+	}
+
+	gi := filepath.Join("results", ".gitignore")
+	if _, err := os.Stat(gi); os.IsNotExist(err) {
+		if err := os.WriteFile(gi, []byte("# schema dumps are large and regenerable - keep them out of git\n*\n!.gitignore\n"), 0o644); err != nil { //nolint:gosec // plain gitignore
+			return fmt.Errorf("writing results/.gitignore: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// providerNameFromBinary turns .../terraform-provider-aws_v5.0.0 into "aws".
+func providerNameFromBinary(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(filepath.Base(path)))
+	name = strings.TrimPrefix(name, "terraform-provider-")
+	if i := strings.Index(name, "_v"); i > 0 {
+		name = name[:i]
+	}
+	return name
 }

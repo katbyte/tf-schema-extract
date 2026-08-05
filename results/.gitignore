@@ -1,0 +1,3 @@
+# schema dumps are large and regenerable - keep them out of git
+*
+!.gitignore
