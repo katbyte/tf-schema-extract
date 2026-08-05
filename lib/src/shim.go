@@ -52,6 +52,10 @@ func main() {
 		"data_sources": resourceMapJSON(p.DataSourcesMap),
 	}
 
+	if fw := frameworkJSON(p); fw != nil {
+		out["framework"] = fw
+	}
+
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "shim: marshalling schema: %v\n", err)
@@ -131,6 +135,13 @@ func resourceJSON(r *schema.Resource, isElem bool) map[string]any {
 		out["state_upgraders"] = ups
 	}
 
+	if ident := identityJSON(r); ident != nil {
+		out["identity"] = ident
+	}
+	if boolField(r, "MutableIdentity") {
+		out["mutable_identity"] = true
+	}
+
 	if t := r.Timeouts; t != nil {
 		timeouts := map[string]any{}
 		for name, d := range map[string]any{
@@ -143,6 +154,40 @@ func resourceJSON(r *schema.Resource, isElem bool) map[string]any {
 		if len(timeouts) > 0 {
 			out["timeouts"] = timeouts
 		}
+	}
+
+	return out
+}
+
+// identityJSON dumps the resource identity schema (sdk v2.37+); read via reflection so
+// the shim compiles against SDKs that predate it.
+func identityJSON(r *schema.Resource) map[string]any {
+	idv, ok := fieldValue(r, "Identity")
+	if !ok || idv.Kind() != reflect.Ptr || idv.IsNil() {
+		return nil
+	}
+	iv := idv.Elem()
+
+	out := map[string]any{}
+	if f := iv.FieldByName("Version"); f.IsValid() && f.CanInt() {
+		out["version"] = f.Int()
+	}
+	if f := iv.FieldByName("SchemaFunc"); f.IsValid() && f.Kind() == reflect.Func && !f.IsNil() {
+		if res := f.Call(nil); len(res) == 1 {
+			if m, ok := res[0].Interface().(map[string]*schema.Schema); ok {
+				sm := make(map[string]any, len(m))
+				for k, s := range m {
+					e := schemaJSON(s)
+					addBool(e, "required_for_import", boolField(s, "RequiredForImport"))
+					addBool(e, "optional_for_import", boolField(s, "OptionalForImport"))
+					sm[k] = e
+				}
+				out["schema"] = sm
+			}
+		}
+	}
+	if f := iv.FieldByName("IdentityUpgraders"); f.IsValid() && f.Kind() == reflect.Slice && f.Len() > 0 {
+		out["upgraders"] = f.Len()
 	}
 
 	return out

@@ -32,16 +32,18 @@ func configureFlags(root *cobra.Command) error {
 	pflags.String("entry", "", "provider entry point as import/path.FuncName (src mode, auto-detected by default)")
 	pflags.Bool("keep-shim", false, "keep the generated shim package in the provider repo for debugging (src mode)")
 	pflags.Bool("ssa", false, "recover literal validator/default arguments via static call-site analysis (src mode)")
+	pflags.String("framework-entry", "", "plugin-framework provider constructor as import/path.FuncName (src mode, auto-detected by default)")
 
 	// binding map for viper/pflag -> env
 	m := map[string]string{
-		"out":       "TFSCHEMAEX_OUT",
-		"entry":     "TFSCHEMAEX_ENTRY",
-		"keep-shim": "",
-		"ssa":       "TFSCHEMAEX_SSA",
-		"timeout":   "TFSCHEMAEX_TIMEOUT",
-		"silent":    "TFSCHEMAEX_SILENT",
-		"verbose":   "",
+		"out":             "TFSCHEMAEX_OUT",
+		"entry":           "TFSCHEMAEX_ENTRY",
+		"framework-entry": "TFSCHEMAEX_FRAMEWORK_ENTRY",
+		"keep-shim":       "",
+		"ssa":             "TFSCHEMAEX_SSA",
+		"timeout":         "TFSCHEMAEX_TIMEOUT",
+		"silent":          "TFSCHEMAEX_SILENT",
+		"verbose":         "",
 	}
 
 	for name, env := range m {

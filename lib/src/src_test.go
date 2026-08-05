@@ -101,6 +101,45 @@ func Provider() *schema.Provider { return nil }
 	}
 }
 
+func TestFindFrameworkEntry(t *testing.T) {
+	t.Parallel()
+
+	root := writeTestModule(t, map[string]string{
+		"go.mod": "module example.com/terraform-provider-test\n\ngo 1.21\n\nrequire github.com/hashicorp/terraform-plugin-framework v1.0.0\n",
+		"internal/framework/provider.go": `package framework
+
+import (
+	"context"
+
+	"github.com/hashicorp/terraform-plugin-framework/provider"
+)
+
+func NewStandaloneProvider() provider.Provider { return nil }
+
+func NewFrameworkProvider(ctx context.Context, primary interface{ Meta() any }) (provider.Provider, error) {
+	return nil, nil
+}
+`,
+	})
+
+	if !hasFrameworkDep(root) {
+		t.Fatal("hasFrameworkDep should be true")
+	}
+
+	fe, err := findFrameworkEntry(root, "example.com/terraform-provider-test", "")
+	if err != nil {
+		t.Fatalf("findFrameworkEntry: %v", err)
+	}
+
+	// the primary-wired constructor outranks the standalone one
+	if fe.Func != "NewFrameworkProvider" || !fe.ReturnsErr {
+		t.Errorf("entry: %+v", fe)
+	}
+	if len(fe.Params) != 2 || fe.Params[0] != "ctx" || fe.Params[1] != "primary" {
+		t.Errorf("params: %v", fe.Params)
+	}
+}
+
 func TestFindEntryNone(t *testing.T) {
 	t.Parallel()
 

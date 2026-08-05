@@ -22,9 +22,10 @@ type Dump struct {
 	Mode            string          `json:"mode"`   // "plugin" or "src"
 	Source          string          `json:"source"` // provider binary path (plugin) or repo path (src)
 	ProtocolVersion int             `json:"protocol_version,omitempty"`
-	Entry           string          `json:"entry,omitempty"` // provider entry point func (src mode)
-	SDK             string          `json:"sdk,omitempty"`   // "sdkv2" (src mode)
-	SSA             bool            `json:"ssa,omitempty"`   // src payload was enriched with static call-site analysis
+	Entry           string          `json:"entry,omitempty"`           // provider entry point func (src mode)
+	FrameworkEntry  string          `json:"framework_entry,omitempty"` // plugin-framework constructor (src mode, muxed providers)
+	SDK             string          `json:"sdk,omitempty"`             // "sdkv2" (src mode)
+	SSA             bool            `json:"ssa,omitempty"`             // src payload was enriched with static call-site analysis
 	Plugin          *PluginDump     `json:"plugin,omitempty"`
 	Src             json.RawMessage `json:"src,omitempty"`
 }

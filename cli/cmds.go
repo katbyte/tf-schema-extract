@@ -136,7 +136,7 @@ ambiguous matches list "call_candidates" instead.`,
 			cmd.SilenceUsage = true
 
 			cout.Printf("extracting schema from <cyan>%s</> via source shim...\n", repo)
-			payload, entry, err := src.Extract(cmd.Context(), repo, viper.GetString("entry"), viper.GetBool("keep-shim"))
+			payload, entry, fwEntry, err := src.Extract(cmd.Context(), repo, viper.GetString("entry"), viper.GetString("framework-entry"), viper.GetBool("keep-shim"))
 			if err != nil {
 				return err
 			}
@@ -169,6 +169,9 @@ ambiguous matches list "call_candidates" instead.`,
 				SDK:           "sdkv2",
 				SSA:           ssa,
 				Src:           payload,
+			}
+			if fwEntry != nil {
+				out.FrameworkEntry = fwEntry.String()
 			}
 
 			mode := "src"

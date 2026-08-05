@@ -41,9 +41,10 @@ rather than the protocol.
 |---------------------------------------------------------------|:------:|:---:|:---------:|
 | resources / data sources / attributes / blocks / types        | ✔      | ✔   | ✔         |
 | required / optional / computed / sensitive / deprecated       | ✔      | ✔   | ✔         |
-| ephemeral + list resources, actions, provider functions       | ✔      |     |           |
-| resource identity schemas                                     | ✔      |     |           |
-| plugin-framework resources (muxed providers)                  | ✔      |     |           |
+| ephemeral + list resources, actions, provider functions       | ✔      | ✔   | ✔         |
+| resource identity schemas                                     | ✔      | ✔   | ✔         |
+| plugin-framework resources (muxed providers)                  | ✔      | ✔   | ✔         |
+| framework validators / defaults / plan modifiers              |        | ✔   | ✔         |
 | **ForceNew**                                                  |        | ✔   | ✔         |
 | defaults + DefaultFunc                                        |        | ✔   | ✔         |
 | which validator is attached (name + origin + file:line)       |        | ✔   | ✔         |
@@ -57,14 +58,16 @@ rather than the protocol.
 For the complete picture of a provider, run plugin mode and `src --ssa` and join on
 resource name. Measured results:
 
-- **azurerm**: plugin mode sees 1103 resources / 394 data sources / 172 identity
-  schemas; `--ssa` recovers exact literal args for ~88% of its ~4,500 constructor-built
-  validator/default funcs.
+- **azurerm**: both modes see 1103 resources / 394 data sources / 172 identity schemas,
+  plus (src, via the framework side) 83 list resources, 7 actions, 2 ephemeral
+  resources and 2 functions; `--ssa` recovers exact literal args for ~88% of its ~4,500
+  constructor-built validator/default funcs.
 - **aws**: plugin mode sees 1687 resources / 673 data sources (102 MB of schema); src
-  mode sees the 1240 resources / 514 data sources that live on the SDKv2 side of the
-  mux - the gap *is* the plugin-framework surface, made visible by comparing the two.
-  `--ssa` recovers args (or generic type params) for ~85% of ~49,500 constructor-built
-  funcs, in about ten seconds of analysis.
+  mode sees the same total as 1240 SDKv2 + 447 framework resources (514 + 159 data
+  sources) - the mux split made visible - plus 177 list resources, 12 actions, 10
+  ephemeral resources, 4 functions and identity schemas on both sides. `--ssa` recovers
+  args (or generic type params) for ~85% of ~49,500 constructor-built funcs, in about
+  ten seconds of analysis.
 
 ## how src mode gets filenames without SSA
 
@@ -170,6 +173,19 @@ parameter and an `error` result — preferring `Provider`/`*Provider` names and 
 `Test*`. azurerm's `AzureProvider()`, azuread's `AzureADProvider()` and aws's
 `sdkv2.NewProvider(ctx) (*schema.Provider, error)` are all found automatically.
 
+When the module also uses terraform-plugin-framework, src mode locates the framework
+provider constructor the same way (preferring ones wired to the SDKv2 provider, like
+aws's `NewProvider(ctx, primary)` and azurerm's `NewFrameworkProvider(primary)`;
+override with `--framework-entry`) and walks the framework side of the mux entirely via
+reflection — so it works across framework versions and captures framework resources,
+data sources, ephemeral + list resources, actions, functions and identity schemas under
+a `framework` key. Framework attributes carry more than the protocol exposes:
+validators, plan modifiers and defaults appear with their human-readable descriptions
+and internal parameters, and `RequiresReplace` plan modifiers are folded into a
+`force_new` flag to mirror the SDKv2 side. (`--ssa` literal-arg recovery targets the
+SDKv2 side; framework validator values are usually already visible in their
+descriptions.)
+
 ## output
 
 The envelope is shared; the payload shape depends on the mode:
@@ -200,8 +216,6 @@ make proto    # regenerate the tfplugin5/tfplugin6 stubs from terraform-plugin-g
 
 ## limitations / future work
 
-- src mode covers terraform-plugin-sdk v2 providers only; plugin-framework resources in
-  muxed providers (and functions/ephemeral resources) are captured by plugin mode.
 - azurerm's typed (`internal/sdk`) resources report wrapper functions for CRUD; their
   schemas are still fully captured.
 - `--ssa` resolves external packages via the provider's `vendor/` directory; providers
@@ -210,4 +224,5 @@ make proto    # regenerate the tfplugin5/tfplugin6 stubs from terraform-plugin-g
 - true SSA value-tracing (constants, args threaded through variables, non-literal
   expressions) would push the ~85-90% arg-recovery rate higher — those currently fall
   back to `expr` source text.
-- SDKv2 resource identity schemas are currently only captured via plugin mode.
+- `--ssa` call-site enrichment does not yet cover framework validator constructors
+  (their values are usually visible in validator descriptions already).

@@ -12,6 +12,7 @@ package src
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -42,13 +44,32 @@ func (e Entry) String() string {
 	return e.Package + "." + e.Func
 }
 
+// FrameworkEntry identifies a plugin-framework provider constructor in a muxed
+// provider - e.g. aws's NewProvider(ctx, primary) (provider.Provider, error) or
+// azurerm's NewFrameworkProvider(primary). Params records each parameter as "ctx"
+// (a context.Context) or "primary" (anything else - the SDKv2 provider satisfies the
+// anonymous interface{ Meta() any } both aws and azurerm use).
+type FrameworkEntry struct {
+	Package    string
+	Func       string
+	File       string
+	Params     []string
+	ReturnsErr bool
+}
+
+func (e FrameworkEntry) String() string {
+	return e.Package + "." + e.Func
+}
+
 // Extract locates the provider entry point in the repo at path (or uses the explicit
 // "import/path.Func" entry override), generates the reflection shim, runs it with the
-// provider's own module context, and returns the raw JSON payload plus the entry used.
-func Extract(ctx context.Context, repoPath, entryOverride string, keepShim bool) (json.RawMessage, Entry, error) {
+// provider's own module context, and returns the raw JSON payload plus the entries
+// used. When the module depends on terraform-plugin-framework, the framework provider
+// constructor is located too and the shim dumps the framework side of the mux as well.
+func Extract(ctx context.Context, repoPath, entryOverride, fwEntryOverride string, keepShim bool) (json.RawMessage, Entry, *FrameworkEntry, error) {
 	root, modPath, err := FindModule(repoPath)
 	if err != nil {
-		return nil, Entry{}, err
+		return nil, Entry{}, nil, err
 	}
 	cout.Printf("  module <cyan>%s</> at <gray>%s</>\n", modPath, root)
 
@@ -56,26 +77,54 @@ func Extract(ctx context.Context, repoPath, entryOverride string, keepShim bool)
 	if entryOverride != "" {
 		i := strings.LastIndex(entryOverride, ".")
 		if i < 1 || i == len(entryOverride)-1 {
-			return nil, Entry{}, fmt.Errorf("invalid --entry %q, expected import/path.FuncName", entryOverride)
+			return nil, Entry{}, nil, fmt.Errorf("invalid --entry %q, expected import/path.FuncName", entryOverride)
 		}
 		entry = Entry{Package: entryOverride[:i], Func: entryOverride[i+1:]}
 		if err := resolveEntry(root, modPath, &entry); err != nil {
-			return nil, Entry{}, err
+			return nil, Entry{}, nil, err
 		}
 	} else {
 		entry, err = findEntry(root, modPath)
 		if err != nil {
-			return nil, Entry{}, err
+			return nil, Entry{}, nil, err
 		}
 	}
 	cout.Printf("  entry <green>%s</>\n", entry)
 
-	payload, err := runShim(ctx, root, entry, keepShim)
-	if err != nil {
-		return nil, entry, err
+	var fwEntry *FrameworkEntry
+	if hasFrameworkDep(root) {
+		if fe, ferr := findFrameworkEntry(root, modPath, fwEntryOverride); ferr == nil {
+			fwEntry = &fe
+			cout.Printf("  framework entry <green>%s</>\n", fe)
+		} else {
+			cout.Printf("  <yellow>module uses terraform-plugin-framework but no entry point was found (%v) - framework schemas skipped, use --framework-entry</>\n", ferr)
+		}
 	}
 
-	return payload, entry, nil
+	payload, err := runShim(ctx, root, entry, fwEntry, keepShim)
+	if err != nil {
+		return nil, entry, fwEntry, err
+	}
+
+	return payload, entry, fwEntry, nil
+}
+
+// hasFrameworkDep reports whether the module requires terraform-plugin-framework.
+func hasFrameworkDep(root string) bool {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod")) //nolint:gosec // reading the user-supplied repo's go.mod is the entire point
+	if err != nil {
+		return false
+	}
+	mf, err := modfile.ParseLax("go.mod", data, nil)
+	if err != nil {
+		return false
+	}
+	for _, r := range mf.Require {
+		if r.Mod.Path == "github.com/hashicorp/terraform-plugin-framework" {
+			return true
+		}
+	}
+	return false
 }
 
 // FindModule walks up from path until it finds a go.mod and returns the module root and path.
@@ -283,6 +332,178 @@ func resolveEntry(root, modPath string, entry *Entry) error {
 	return fmt.Errorf("--entry func %s not found in %s", entry.Func, dir)
 }
 
+// findFrameworkEntry scans for exported constructors returning the plugin-framework
+// provider.Provider. Parameters are classified as "ctx" (context.Context) or "primary"
+// (anything else, passed the SDKv2 provider). With an override of the form
+// import/path.FuncName only that func is accepted.
+func findFrameworkEntry(root, modPath, override string) (FrameworkEntry, error) {
+	wantPkg, wantFunc := "", ""
+	if override != "" {
+		i := strings.LastIndex(override, ".")
+		if i < 1 || i == len(override)-1 {
+			return FrameworkEntry{}, fmt.Errorf("invalid --framework-entry %q, expected import/path.FuncName", override)
+		}
+		wantPkg, wantFunc = override[:i], override[i+1:]
+	}
+
+	var candidates []FrameworkEntry
+
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "vendor" || name == "testdata" || name == ".git" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return nil //nolint:nilerr // skip unparsable files, they can't contain our entry point
+		}
+
+		providerAlias := ""
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if strings.HasSuffix(p, "terraform-plugin-framework/provider") {
+				providerAlias = "provider"
+				if imp.Name != nil {
+					providerAlias = imp.Name.Name
+				}
+			}
+		}
+		if providerAlias == "" || providerAlias == "_" {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(root, path)
+		pkgPath := modPath
+		if dir := filepath.Dir(rel); dir != "." {
+			pkgPath = modPath + "/" + filepath.ToSlash(dir)
+		}
+		if wantPkg != "" && pkgPath != wantPkg {
+			return nil
+		}
+
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !fn.Name.IsExported() {
+				continue
+			}
+			if wantFunc != "" && fn.Name.Name != wantFunc {
+				continue
+			}
+
+			params, ok := frameworkParams(fn)
+			if !ok {
+				continue
+			}
+			returnsErr, ok := frameworkResults(fn, providerAlias)
+			if !ok {
+				continue
+			}
+
+			candidates = append(candidates, FrameworkEntry{
+				Package: pkgPath, Func: fn.Name.Name, File: rel,
+				Params: params, ReturnsErr: returnsErr,
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		return FrameworkEntry{}, fmt.Errorf("scanning %s for framework entry point: %w", root, err)
+	}
+
+	if len(candidates) == 0 {
+		if override != "" {
+			return FrameworkEntry{}, fmt.Errorf("--framework-entry %s not found or has an unsupported signature", override)
+		}
+		return FrameworkEntry{}, errors.New("no constructor returning a framework provider.Provider found")
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool { return frameworkRank(candidates[i]) < frameworkRank(candidates[j]) })
+
+	if len(candidates) > 1 {
+		cout.Verbosef("  found <yellow>%d</> framework entry point candidates:\n", len(candidates))
+		for _, c := range candidates {
+			cout.Verbosef("    %s <gray>(%s)</>\n", c, c.File)
+		}
+	}
+
+	return candidates[0], nil
+}
+
+// frameworkParams classifies constructor parameters: context.Context -> "ctx", one
+// anything-else -> "primary" (it receives the SDKv2 provider).
+func frameworkParams(fn *ast.FuncDecl) ([]string, bool) {
+	var params []string
+	primaries := 0
+	for _, field := range fn.Type.Params.List {
+		n := max(len(field.Names), 1)
+		for range n {
+			if sel, ok := field.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Context" {
+				params = append(params, "ctx")
+				continue
+			}
+			primaries++
+			params = append(params, "primary")
+		}
+	}
+	if len(params) > 2 || primaries > 1 {
+		return nil, false
+	}
+	return params, true
+}
+
+// frameworkResults accepts (provider.Provider) or (provider.Provider, error).
+func frameworkResults(fn *ast.FuncDecl, providerAlias string) (returnsErr, ok bool) {
+	results := fn.Type.Results
+	switch results.NumFields() {
+	case 1:
+	case 2:
+		id, isIdent := results.List[1].Type.(*ast.Ident)
+		if !isIdent || id.Name != "error" {
+			return false, false
+		}
+		returnsErr = true
+	default:
+		return false, false
+	}
+
+	sel, isSel := results.List[0].Type.(*ast.SelectorExpr)
+	if !isSel || sel.Sel.Name != "Provider" {
+		return false, false
+	}
+	pkgIdent, isIdent := sel.X.(*ast.Ident)
+	if !isIdent || pkgIdent.Name != providerAlias {
+		return false, false
+	}
+
+	return returnsErr, true
+}
+
+// frameworkRank prefers constructors wired to the SDKv2 provider (aws's
+// NewProvider(ctx, primary), azurerm's NewFrameworkProvider(primary)) over standalone
+// ones, and skips Test* helpers.
+func frameworkRank(e FrameworkEntry) int {
+	switch {
+	case strings.HasPrefix(e.Func, "Test"):
+		return 3
+	case slices.Contains(e.Params, "primary"):
+		return 0
+	default:
+		return 1
+	}
+}
+
 func entryRank(e Entry) int {
 	switch {
 	case strings.HasPrefix(e.Func, "Test"):
@@ -298,7 +519,7 @@ func entryRank(e Entry) int {
 
 // runShim writes the generated shim package into the module root (so imports resolve
 // against the provider's go.mod and vendor directory), runs it, and returns its JSON.
-func runShim(ctx context.Context, root string, entry Entry, keepShim bool) (json.RawMessage, error) {
+func runShim(ctx context.Context, root string, entry Entry, fwEntry *FrameworkEntry, keepShim bool) (json.RawMessage, error) {
 	shimDir := filepath.Join(root, shimDirName)
 	if err := os.MkdirAll(shimDir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating shim dir %s: %w", shimDir, err)
@@ -330,6 +551,33 @@ func runShim(ctx context.Context, root string, entry Entry, keepShim bool) (json
 
 	if err := os.WriteFile(filepath.Join(shimDir, "main.go"), []byte(shimSrc), 0o644); err != nil { //nolint:gosec // generated source, not sensitive
 		return nil, fmt.Errorf("writing shim: %w", err)
+	}
+
+	fwSrc := shimFrameworkStub
+	if fwEntry != nil {
+		args := make([]string, 0, len(fwEntry.Params))
+		for _, p := range fwEntry.Params {
+			if p == "ctx" {
+				args = append(args, "context.Background()")
+			} else {
+				args = append(args, "p")
+			}
+		}
+		fwCall := "fwp := fwentry." + fwEntry.Func + "(" + strings.Join(args, ", ") + ")"
+		if fwEntry.ReturnsErr {
+			fwCall = "fwp, err := fwentry." + fwEntry.Func + "(" + strings.Join(args, ", ") + ")\n" +
+				"\tif err != nil {\n" +
+				"\t\tfmt.Fprintf(os.Stderr, \"shim: constructing framework provider: %v\\n\", err)\n" +
+				"\t\treturn nil\n" +
+				"\t}"
+		}
+		fwSrc = strings.NewReplacer(
+			"__FW_ENTRY_PACKAGE__", fwEntry.Package,
+			"__FW_CALL__", fwCall,
+		).Replace(shimFrameworkTemplate)
+	}
+	if err := os.WriteFile(filepath.Join(shimDir, "framework.go"), []byte(fwSrc), 0o644); err != nil { //nolint:gosec // generated source, not sensitive
+		return nil, fmt.Errorf("writing framework shim: %w", err)
 	}
 
 	outFile, err := os.CreateTemp("", "tfschemaex-src-*.json")
