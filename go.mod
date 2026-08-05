@@ -1,6 +1,6 @@
 module github.com/katbyte/tfschemaex
 
-go 1.26.5
+go 1.25.3
 
 require (
 	github.com/gookit/color v1.6.1
