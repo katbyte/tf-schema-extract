@@ -1,0 +1,25 @@
+---
+name: lint
+on:
+  push:
+    branches: [ 'main' ]
+  pull_request:
+    types: ['opened', 'synchronize']
+    paths:
+      - '.github/**'
+      - '**.go'
+      - 'vendor/**'
+      - '.github/workflows/**'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ./.go-version
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: 'v2.12.2'
+          args: -v
