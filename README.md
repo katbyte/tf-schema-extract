@@ -56,18 +56,71 @@ rather than the protocol.
 | attribute declaration call site (file:line)                   |        |     | ✔         |
 
 For the complete picture of a provider, run plugin mode and `src --ssa` and join on
-resource name. Measured results:
+resource name.
 
-- **azurerm**: both modes see 1103 resources / 394 data sources / 172 identity schemas,
-  plus (src, via the framework side) 83 list resources, 7 actions, 2 ephemeral
-  resources and 2 functions; `--ssa` recovers exact literal args for ~88% of its ~4,500
-  constructor-built validator/default funcs.
-- **aws**: plugin mode sees 1687 resources / 673 data sources (102 MB of schema); src
-  mode sees the same total as 1240 SDKv2 + 447 framework resources (514 + 159 data
-  sources) - the mux split made visible - plus 177 list resources, 12 actions, 10
-  ephemeral resources, 4 functions and identity schemas on both sides. `--ssa` recovers
-  args (or generic type params) for ~85% of ~49,500 constructor-built funcs, in about
-  ten seconds of analysis.
+## measured: three providers × three modes
+
+Snapshot from 2026-08-05: azuread and azurerm (SDKv2 with a small framework side) and
+aws (heavily muxed), extracted with all three modes. Counts below are managed-resource
+attributes unless noted; "—" means the mode cannot see that fact at all.
+
+### azuread
+
+| | plugin | src | src --ssa |
+|---|---:|---:|---:|
+| dump size | 0.2 MB | 0.6 MB | 0.6 MB |
+| resources / data sources | 35 / 17 | 54 / 20 | 54 / 20 |
+| attributes with ForceNew | — | 130 | 130 |
+| attributes with validators | — | 332 | 332 |
+| └ literal args recovered | — | — | 132 + 6 candidate |
+| defaults / constraint groups / diff-suppress | — | 37 / 57 / 19 | 37 / 57 / 19 |
+| CRUD funcs with file:line | — | 54 | 54 |
+
+The 35 vs 54 resource gap is not a mode difference — the installed binary predates the
+checkout. It illustrates what each mode actually measures: plugin mode describes **the
+artifact you ship**, src mode describes **the code as it is now**.
+
+### azurerm
+
+| | plugin | src | src --ssa |
+|---|---:|---:|---:|
+| dump size | 6.9 MB | 13.4 MB | 17.2 MB |
+| resources / data sources | 1103 / 394 | 1103 / 394 | 1103 / 394 |
+| ephemeral / list / actions / functions | 2 / 83 / 7 / 2 | 2 / 83 / 7 / 2 | 2 / 83 / 7 / 2 |
+| resource identity schemas | 172 | 172 | 172 |
+| attributes with ForceNew | — | 5347 | 5347 |
+| attributes with validators | — | 12322 | 12322 |
+| └ literal args recovered | — | — | 3802 + 299 candidate |
+| defaults / constraint groups / diff-suppress | — | 2436 / 1397 / 802 | 2436 / 1397 / 802 |
+| CRUD funcs with file:line | — | 1103 | 1103 |
+
+Everything agrees mode-to-mode — and note what the protocol hides: 5,347 ForceNew
+markers and 12,322 attached validators exist only below the wire. Only ~8% of azurerm's
+attributes carry descriptions at the protocol level (docs live in the website, not the
+schema), so for azurerm the schema alone is a poor documentation source in every mode.
+
+### aws
+
+| | plugin | src | src --ssa |
+|---|---:|---:|---:|
+| dump size | 102 MB | 159 MB | 221 MB |
+| resources | 1687 | 1240 sdkv2 + 447 fw = 1687 | 1687 |
+| data sources | 673 | 514 sdkv2 + 159 fw = 673 | 673 |
+| ephemeral / list / actions / functions | 10 / 177 / 12 / 4 | 10 / 177 / 12 / 4 | 10 / 177 / 12 / 4 |
+| resource identity schemas | 463 | 292 sdkv2 + 171 fw = 463 | 463 |
+| attributes with ForceNew | — | 4672 sdkv2 + 1293 fw | 5965 |
+| attributes with validators (sdkv2) | — | 58433 | 58433 |
+| └ literal args / enum type params recovered | — | — | 42136 + 4888 candidate |
+| framework attrs with validators (described) | — | 1522 | 1522 |
+| defaults / constraint groups / diff-suppress (sdkv2) | — | 2980 / 1103 / 720 | 2980 / 1103 / 720 |
+| CRUD funcs with file:line | — | 1240 | 1240 |
+
+The totals cross-check exactly: 1240+447 resources, 514+159 data sources and 292+171
+identity schemas each reproduce the protocol's numbers while exposing the mux split the
+protocol erases. aws also shows the scale difference in validation styles: ~58k
+validator attachments on the SDKv2 side (mostly `validation.*` constructors, args
+recoverable by --ssa) vs ~1.5k on the framework side (self-describing validator
+objects, values already in their descriptions).
 
 ## how src mode gets filenames without SSA
 
