@@ -52,10 +52,16 @@ rather than the protocol.
 | attribute declaration call site (file:line)                   |        |     | ✔         |
 
 For the complete picture of a provider, run plugin mode and `src --ssa` and join on
-resource name. Measured against terraform-provider-azurerm: plugin mode dumps 1103
-resources / 394 data sources / 172 identity schemas; `--ssa` recovers exact literal
-args for ~90% of the ~4,500 constructor-built validator/default funcs in about ten
-seconds of analysis.
+resource name. Measured results:
+
+- **azurerm**: plugin mode sees 1103 resources / 394 data sources / 172 identity
+  schemas; `--ssa` recovers exact literal args for ~88% of its ~4,500 constructor-built
+  validator/default funcs.
+- **aws**: plugin mode sees 1687 resources / 673 data sources (102 MB of schema); src
+  mode sees the 1240 resources / 514 data sources that live on the SDKv2 side of the
+  mux - the gap *is* the plugin-framework surface, made visible by comparing the two.
+  `--ssa` recovers args (or generic type params) for ~85% of ~49,500 constructor-built
+  funcs, in about ten seconds of analysis.
 
 ## how src mode gets filenames without SSA
 
@@ -115,6 +121,20 @@ guess, and when multiple sites agree on identical args the call carries
 `"sites": N`. The `call.file`/`call.line` point at the attribute's declaration, which is
 how `--ssa` also yields per-attribute source positions.
 
+Two provider patterns need extra machinery, both discovered via aws:
+
+- **Generic validators.** aws validates enums with `enum.Validate[awstypes.X]()`; the
+  runtime erases the type param, collapsing every enum validator in the provider into
+  one origin (`enum.validateSlow[...]`). The scanner therefore indexes generic
+  instantiations (their type arguments are the payload — emitted as `"type_args":
+  ["awstypes.AlternateContactType"]`), and matching falls back from the callee name to
+  any call whose package qualifier matches the origin's package.
+- **Anchoring.** Refs without caller context can't be matched repo-wide without risking
+  confident wrong answers. Each resource's caller-scoped matches vote for its anchor
+  file (CRUD refs can't be used — aws routes every resource through one shared
+  interceptor), and anchor-less refs are matched in that file, then its directory, then
+  globally only on an exact attribute-name hit.
+
 (Naming honesty: the current pass is AST-based call-site analysis, not full SSA
 value-tracing — the flag is named for where it's headed. Constants like
 `math.MaxInt32` or values threaded through variables surface as `expr` text today;
@@ -141,10 +161,11 @@ tfschemaex version
 Progress goes to stderr; only the JSON goes to stdout, so `tfschemaex plugin p > s.json`
 is always clean.
 
-Src mode entry detection scans for zero-arg exported functions returning
-`*schema.Provider` (terraform-plugin-sdk v2), preferring `Provider`/`*Provider` names and
-skipping `Test*` — azurerm's `internal/provider.AzureProvider` and azuread's
-`AzureADProvider` are found automatically.
+Src mode entry detection scans for exported constructor functions returning
+`*schema.Provider` (terraform-plugin-sdk v2) — with or without a `context.Context`
+parameter and an `error` result — preferring `Provider`/`*Provider` names and skipping
+`Test*`. azurerm's `AzureProvider()`, azuread's `AzureADProvider()` and aws's
+`sdkv2.NewProvider(ctx) (*schema.Provider, error)` are all found automatically.
 
 ## output
 
@@ -184,6 +205,6 @@ make proto    # regenerate the tfplugin5/tfplugin6 stubs from terraform-plugin-g
   that don't vendor lose the call sites living in dependencies (they count as
   unlocated).
 - true SSA value-tracing (constants, args threaded through variables, non-literal
-  expressions) would push the ~90% arg-recovery rate higher — those currently fall back
-  to `expr` source text.
+  expressions) would push the ~85-90% arg-recovery rate higher — those currently fall
+  back to `expr` source text.
 - SDKv2 resource identity schemas are currently only captured via plugin mode.

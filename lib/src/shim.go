@@ -17,6 +17,7 @@ const shimTemplate = `package main
 // safe to delete.
 
 import (
+	__IMPORT_CONTEXT__
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,7 +41,7 @@ func main() {
 	}
 	cwd, _ = os.Getwd()
 
-	p := entry.__ENTRY_FUNC__()
+	__ENTRY_CALL__
 
 	out := map[string]any{
 		"provider": map[string]any{

@@ -52,6 +52,10 @@ func testPayload() json.RawMessage {
 	return json.RawMessage(`{
 		"resources": {
 			"test_thing": {
+				"create": {
+					"name": "example.com/p/internal/things.resourceThingCreate",
+					"file": "internal/things/thing.go", "line": 5
+				},
 				"schema": {
 					"port": {
 						"type": "TypeInt",

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 
 	hclog "github.com/hashicorp/go-hclog"
@@ -59,6 +60,11 @@ func Extract(ctx context.Context, binary string) (*schemajson.PluginDump, int, e
 		Cmd:              exec.CommandContext(ctx, binary),
 		AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
 		AutoMTLS:         true,
+		// large providers (aws) exceed grpc's 4MB default receive limit; terraform
+		// raises it the same way
+		GRPCDialOptions: []grpc.DialOption{
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32)),
+		},
 		Logger: hclog.New(&hclog.LoggerOptions{
 			Name:   "tfschemaex",
 			Level:  hclog.Error,

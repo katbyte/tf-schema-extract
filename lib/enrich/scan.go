@@ -21,11 +21,13 @@ type callSite struct {
 	PkgPath       string // import path of the package the call appears in
 	File          string // repo-relative file
 	Line          int
-	Callee        string // short func name being called, e.g. IntBetween
-	EnclosingFunc string // named function the call appears in
-	Receiver      string // receiver type name when EnclosingFunc is a method
-	Field         string // schema field the call value feeds: ValidateFunc, DefaultFunc, ... or "return"
-	AttrKey       string // nearest enclosing string map key, i.e. the attribute name
+	Callee        string   // short func name being called, e.g. IntBetween
+	Qual          string   // package qualifier at the call, e.g. the "enum" in enum.Validate[T]()
+	TypeArgs      []string // generic instantiation type arguments, e.g. awstypes.InstanceType
+	EnclosingFunc string   // named function the call appears in
+	Receiver      string   // receiver type name when EnclosingFunc is a method
+	Field         string   // schema field the call value feeds: ValidateFunc, DefaultFunc, ... or "return"
+	AttrKey       string   // nearest enclosing string map key, i.e. the attribute name
 	Args          []any
 }
 
@@ -51,7 +53,8 @@ type index struct {
 
 	mu           sync.Mutex
 	byCallee     map[string][]*callSite
-	extraPkgs    map[string]bool // vendor packages scanned on demand
+	byQual       map[string][]*callSite // e.g. every enum.* call, for generic origins whose callee name is erased
+	extraPkgs    map[string]bool        // vendor packages scanned on demand
 	filesScanned int
 }
 
@@ -62,6 +65,7 @@ func buildIndex(root, modPath string) (*index, error) {
 		root:      root,
 		modPath:   modPath,
 		byCallee:  map[string][]*callSite{},
+		byQual:    map[string][]*callSite{},
 		extraPkgs: map[string]bool{},
 	}
 
@@ -189,13 +193,8 @@ func (ix *index) scanFile(path string) {
 			return true
 		}
 
-		var callee string
-		switch fn := call.Fun.(type) {
-		case *ast.SelectorExpr:
-			callee = fn.Sel.Name
-		case *ast.Ident:
-			callee = fn.Name
-		default:
+		callee, qual, typeArgs := calleeOf(call.Fun, fset, src)
+		if callee == "" {
 			return true
 		}
 
@@ -240,6 +239,8 @@ func (ix *index) scanFile(path string) {
 			File:          relFile,
 			Line:          fset.Position(call.Pos()).Line,
 			Callee:        callee,
+			Qual:          qual,
+			TypeArgs:      typeArgs,
 			EnclosingFunc: enclosing,
 			Receiver:      receiver,
 			Field:         field,
@@ -258,7 +259,35 @@ func (ix *index) scanFile(path string) {
 	ix.filesScanned++
 	for _, s := range sites {
 		ix.byCallee[s.Callee] = append(ix.byCallee[s.Callee], s)
+		if s.Qual != "" {
+			ix.byQual[s.Qual] = append(ix.byQual[s.Qual], s)
+		}
 	}
+}
+
+// calleeOf extracts the called func's short name, its package qualifier, and any
+// generic type arguments - enum.Validate[awstypes.InstanceType] yields
+// ("Validate", "enum", ["awstypes.InstanceType"]).
+func calleeOf(fun ast.Expr, fset *token.FileSet, src []byte) (callee, qual string, typeArgs []string) {
+	switch fn := fun.(type) {
+	case *ast.IndexExpr:
+		callee, qual, _ = calleeOf(fn.X, fset, src)
+		typeArgs = []string{rawText(fn.Index, fset, src)}
+	case *ast.IndexListExpr:
+		callee, qual, _ = calleeOf(fn.X, fset, src)
+		typeArgs = make([]string, 0, len(fn.Indices))
+		for _, idx := range fn.Indices {
+			typeArgs = append(typeArgs, rawText(idx, fset, src))
+		}
+	case *ast.SelectorExpr:
+		callee = fn.Sel.Name
+		if id, ok := fn.X.(*ast.Ident); ok {
+			qual = id.Name
+		}
+	case *ast.Ident:
+		callee = fn.Name
+	}
+	return callee, qual, typeArgs
 }
 
 // returnsFuncType reports whether the func returns a single func-shaped value: either a
@@ -358,25 +387,27 @@ func evalExpr(e ast.Expr, fset *token.FileSet, src []byte) any {
 		}
 		return vals
 	case *ast.CallExpr:
-		callee := ""
-		switch fn := v.Fun.(type) {
-		case *ast.SelectorExpr:
-			callee = fn.Sel.Name
-		case *ast.Ident:
-			callee = fn.Name
-		}
+		callee, _, typeArgs := calleeOf(v.Fun, fset, src)
 		if callee != "" {
-			return map[string]any{"func": callee, argsKey: evalArgs(v.Args, fset, src)}
+			out := map[string]any{"func": callee, argsKey: evalArgs(v.Args, fset, src)}
+			if len(typeArgs) > 0 {
+				out["type_args"] = typeArgs
+			}
+			return out
 		}
 	}
 	return exprText(e, fset, src)
 }
 
 func exprText(e ast.Expr, fset *token.FileSet, src []byte) map[string]any {
+	return map[string]any{"expr": rawText(e, fset, src)}
+}
+
+func rawText(e ast.Expr, fset *token.FileSet, src []byte) string {
 	start := fset.Position(e.Pos()).Offset
 	end := fset.Position(e.End()).Offset
 	if start < 0 || end > len(src) || start >= end {
-		return map[string]any{"expr": "?"}
+		return "?"
 	}
-	return map[string]any{"expr": string(src[start:end])}
+	return string(src[start:end])
 }

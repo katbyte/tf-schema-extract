@@ -26,11 +26,16 @@ import (
 	"golang.org/x/mod/modfile"
 )
 
-// Entry identifies a zero-argument function returning *schema.Provider.
+// Entry identifies a provider constructor function. Supported signatures are any
+// combination of an optional context.Context parameter and an optional error result
+// around *schema.Provider - e.g. azurerm's AzureProvider() *schema.Provider and aws's
+// NewProvider(ctx) (*schema.Provider, error).
 type Entry struct {
-	Package string // full import path, e.g. github.com/hashicorp/terraform-provider-azurerm/internal/provider
-	Func    string // e.g. AzureProvider
-	File    string // repo-relative file the func was found in
+	Package    string // full import path, e.g. github.com/hashicorp/terraform-provider-azurerm/internal/provider
+	Func       string // e.g. AzureProvider
+	File       string // repo-relative file the func was found in
+	TakesCtx   bool   // func takes a context.Context
+	ReturnsErr bool   // func returns (*schema.Provider, error)
 }
 
 func (e Entry) String() string {
@@ -54,6 +59,9 @@ func Extract(ctx context.Context, repoPath, entryOverride string, keepShim bool)
 			return nil, Entry{}, fmt.Errorf("invalid --entry %q, expected import/path.FuncName", entryOverride)
 		}
 		entry = Entry{Package: entryOverride[:i], Func: entryOverride[i+1:]}
+		if err := resolveEntry(root, modPath, &entry); err != nil {
+			return nil, Entry{}, err
+		}
 	} else {
 		entry, err = findEntry(root, modPath)
 		if err != nil {
@@ -139,19 +147,8 @@ func findEntry(root, modPath string) (Entry, error) {
 			if !ok || fn.Recv != nil || !fn.Name.IsExported() {
 				continue
 			}
-			if fn.Type.Params.NumFields() != 0 || fn.Type.Results.NumFields() != 1 {
-				continue
-			}
-			star, ok := fn.Type.Results.List[0].Type.(*ast.StarExpr)
+			takesCtx, returnsErr, ok := entrySignature(fn, schemaAlias)
 			if !ok {
-				continue
-			}
-			sel, ok := star.X.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Provider" {
-				continue
-			}
-			pkgIdent, ok := sel.X.(*ast.Ident)
-			if !ok || pkgIdent.Name != schemaAlias {
 				continue
 			}
 
@@ -160,7 +157,7 @@ func findEntry(root, modPath string) (Entry, error) {
 			if dir := filepath.Dir(rel); dir != "." {
 				pkgPath = modPath + "/" + filepath.ToSlash(dir)
 			}
-			candidates = append(candidates, Entry{Package: pkgPath, Func: fn.Name.Name, File: rel})
+			candidates = append(candidates, Entry{Package: pkgPath, Func: fn.Name.Name, File: rel, TakesCtx: takesCtx, ReturnsErr: returnsErr})
 		}
 
 		return nil
@@ -184,6 +181,106 @@ func findEntry(root, modPath string) (Entry, error) {
 	}
 
 	return candidates[0], nil
+}
+
+// entrySignature reports whether fn is a provider constructor: an optional
+// context.Context parameter and *schema.Provider with an optional error result.
+func entrySignature(fn *ast.FuncDecl, schemaAlias string) (takesCtx, returnsErr, ok bool) {
+	switch fn.Type.Params.NumFields() {
+	case 0:
+	case 1:
+		sel, isSel := fn.Type.Params.List[0].Type.(*ast.SelectorExpr)
+		if !isSel || sel.Sel.Name != "Context" {
+			return false, false, false
+		}
+		takesCtx = true
+	default:
+		return false, false, false
+	}
+
+	results := fn.Type.Results
+	switch results.NumFields() {
+	case 1:
+	case 2:
+		id, isIdent := results.List[1].Type.(*ast.Ident)
+		if !isIdent || id.Name != "error" {
+			return false, false, false
+		}
+		returnsErr = true
+	default:
+		return false, false, false
+	}
+
+	star, isStar := results.List[0].Type.(*ast.StarExpr)
+	if !isStar {
+		return false, false, false
+	}
+	sel, isSel := star.X.(*ast.SelectorExpr)
+	if !isSel || sel.Sel.Name != "Provider" {
+		return false, false, false
+	}
+	pkgIdent, isIdent := sel.X.(*ast.Ident)
+	if !isIdent || pkgIdent.Name != schemaAlias {
+		return false, false, false
+	}
+
+	return takesCtx, returnsErr, true
+}
+
+// resolveEntry fills in the signature details (and file) for an explicit --entry
+// override by parsing the named package.
+func resolveEntry(root, modPath string, entry *Entry) error {
+	if entry.Package != modPath && !strings.HasPrefix(entry.Package, modPath+"/") {
+		return fmt.Errorf("--entry package %s is not part of module %s", entry.Package, modPath)
+	}
+	dir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(entry.Package, modPath), "/")))
+
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("reading --entry package dir %s: %w", dir, err)
+	}
+
+	fset := token.NewFileSet()
+	for _, de := range files {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".go") || strings.HasSuffix(de.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, de.Name())
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			continue
+		}
+
+		schemaAlias := ""
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if strings.HasSuffix(p, "terraform-plugin-sdk/v2/helper/schema") || strings.HasSuffix(p, "terraform-plugin-sdk/helper/schema") {
+				schemaAlias = "schema"
+				if imp.Name != nil {
+					schemaAlias = imp.Name.Name
+				}
+			}
+		}
+		if schemaAlias == "" || schemaAlias == "_" {
+			continue
+		}
+
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Name.Name != entry.Func {
+				continue
+			}
+			takesCtx, returnsErr, ok := entrySignature(fn, schemaAlias)
+			if !ok {
+				return fmt.Errorf("--entry %s has an unsupported signature (want [ctx] (*schema.Provider[, error]))", entry)
+			}
+			entry.TakesCtx, entry.ReturnsErr = takesCtx, returnsErr
+			entry.File, _ = filepath.Rel(root, path)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("--entry func %s not found in %s", entry.Func, dir)
 }
 
 func entryRank(e Entry) int {
@@ -210,9 +307,25 @@ func runShim(ctx context.Context, root string, entry Entry, keepShim bool) (json
 		defer func() { _ = os.RemoveAll(shimDir) }()
 	}
 
+	call, ctxImport := "p := entry."+entry.Func+"()", ""
+	arg := ""
+	if entry.TakesCtx {
+		arg, ctxImport = "context.Background()", "\"context\"\n"
+	}
+	if entry.ReturnsErr {
+		call = "p, err := entry." + entry.Func + "(" + arg + ")\n" +
+			"\tif err != nil {\n" +
+			"\t\tfmt.Fprintf(os.Stderr, \"shim: constructing provider: %v\\n\", err)\n" +
+			"\t\tos.Exit(1)\n" +
+			"\t}"
+	} else if entry.TakesCtx {
+		call = "p := entry." + entry.Func + "(" + arg + ")"
+	}
+
 	shimSrc := strings.NewReplacer(
 		"__ENTRY_PACKAGE__", entry.Package,
-		"__ENTRY_FUNC__", entry.Func,
+		"__IMPORT_CONTEXT__", ctxImport,
+		"__ENTRY_CALL__", call,
 	).Replace(shimTemplate)
 
 	if err := os.WriteFile(filepath.Join(shimDir, "main.go"), []byte(shimSrc), 0o644); err != nil { //nolint:gosec // generated source, not sensitive
