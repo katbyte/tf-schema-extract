@@ -60,25 +60,9 @@ resource name.
 
 ## measured: three providers × three modes
 
-Snapshot from 2026-08-05: azuread and azurerm (SDKv2 with a small framework side) and
-aws (heavily muxed), extracted with all three modes. Counts below are managed-resource
-attributes unless noted; "—" means the mode cannot see that fact at all.
-
-### azuread
-
-| | plugin | src | src --ssa |
-|---|---:|---:|---:|
-| dump size | 0.2 MB | 0.6 MB | 0.6 MB |
-| resources / data sources | 35 / 17 | 54 / 20 | 54 / 20 |
-| attributes with ForceNew | — | 130 | 130 |
-| attributes with validators | — | 332 | 332 |
-| └ literal args recovered | — | — | 132 + 6 candidate |
-| defaults / constraint groups / diff-suppress | — | 37 / 57 / 19 | 37 / 57 / 19 |
-| CRUD funcs with file:line | — | 54 | 54 |
-
-The 35 vs 54 resource gap is not a mode difference — the installed binary predates the
-checkout. It illustrates what each mode actually measures: plugin mode describes **the
-artifact you ship**, src mode describes **the code as it is now**.
+Snapshot from 2026-08-05: azurerm (SDKv2 with a small framework side) and aws (heavily
+muxed), extracted with all three modes. Counts below are managed-resource attributes
+unless noted; "—" means the mode cannot see that fact at all.
 
 ### azurerm
 
@@ -223,8 +207,8 @@ Progress goes to stderr; with `-o -` only the JSON goes to stdout, so
 Src mode entry detection scans for exported constructor functions returning
 `*schema.Provider` (terraform-plugin-sdk v2) — with or without a `context.Context`
 parameter and an `error` result — preferring `Provider`/`*Provider` names and skipping
-`Test*`. azurerm's `AzureProvider()`, azuread's `AzureADProvider()` and aws's
-`sdkv2.NewProvider(ctx) (*schema.Provider, error)` are all found automatically.
+`Test*`. azurerm's `AzureProvider()` and aws's
+`sdkv2.NewProvider(ctx) (*schema.Provider, error)` are both found automatically.
 
 When the module also uses terraform-plugin-framework, src mode locates the framework
 provider constructor the same way (preferring ones wired to the SDKv2 provider, like
