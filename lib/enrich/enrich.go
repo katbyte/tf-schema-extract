@@ -29,6 +29,7 @@ type Stats struct {
 	MatchedSame  int // multiple call sites but identical args, args attached
 	Ambiguous    int // multiple differing call sites, candidates attached
 	Unlocated    int // no call site found (not vendored, or built dynamically)
+	Promoted     int // matched a resource-site helper call instead of the helper's insides
 	FilesScanned int
 }
 
@@ -90,10 +91,16 @@ type enricher struct {
 	stats *Stats
 }
 
-// pendingRef is a func ref whose origin had no usable caller context in pass 1.
+// pendingRef is a func ref pass 1 could not finish: either its origin had no usable
+// caller context, or it matched inside a shared schema helper whose args are just the
+// helper's parameters (promote names the helper; fallback keeps the inner match in case
+// no resource-site call of it resolves).
 type pendingRef struct {
 	ref                 map[string]any
 	origin, field, attr string
+	promote             string
+	fallback            *callSite
+	fallbackSites       int
 }
 
 // resource enriches one resource (or data source, or the provider block) in two passes.
@@ -121,6 +128,16 @@ func (e *enricher) resource(rr map[string]any) {
 			e.stats.Refs++
 
 			if m, sites, cands, ok := e.matchScoped(origin, fieldForJSON[jsonField], attr); ok {
+				// a unique match whose args are all bare parameter exprs sits inside a
+				// shared schema helper - the literals live at the helper's call sites,
+				// so defer and try to promote one level up in pass 2
+				if m != nil && m.EnclosingFunc != "" && argsAllExpr(m.Args) {
+					pending = append(pending, pendingRef{
+						ref: ref, origin: origin, field: fieldForJSON[jsonField], attr: attr,
+						promote: m.EnclosingFunc, fallback: m, fallbackSites: sites,
+					})
+					continue
+				}
 				e.apply(ref, m, sites, cands)
 				if m != nil && sites == 1 {
 					votes[m.File]++
@@ -155,17 +172,78 @@ func (e *enricher) resource(rr map[string]any) {
 		}
 	}
 
-	anchor, best := "", 0
-	for f, n := range votes {
-		if n > best || (n == best && f < anchor) {
-			anchor, best = f, n
+	anchor := majorityFile(votes, 1)
+
+	// pass 2 runs in two rounds: refs that resolve without an anchor (or with the
+	// scoped-vote anchor) apply immediately and vote; the failures retry once the vote
+	// pool has grown - which is what lets shared-helper promotions disambiguate in
+	// resources whose anchor could only come from other pass-2 matches
+	runPending := func(list []pendingRef, anchor string, final bool) (requeue []pendingRef) {
+		for _, p := range list {
+			if p.promote != "" {
+				// only a unique or identical-args helper call is trusted with the
+				// values; otherwise keep the certain-but-valueless inner match
+				if m, sites, _ := e.matchTiers([][]*callSite{e.ix.byCallee[p.promote]}, p.field, p.attr, anchor); m != nil {
+					e.apply(p.ref, m, sites, nil)
+					e.stats.Promoted++
+					if sites == 1 {
+						votes[m.File]++
+					}
+					continue
+				}
+				if final {
+					e.apply(p.ref, p.fallback, p.fallbackSites, nil)
+				} else {
+					requeue = append(requeue, p)
+				}
+				continue
+			}
+
+			m, sites, cands := e.matchAnchored(p.origin, p.field, p.attr, anchor)
+			if m == nil && len(cands) == 0 && !final {
+				requeue = append(requeue, p)
+				continue
+			}
+			e.apply(p.ref, m, sites, cands)
+			if m != nil && sites == 1 {
+				votes[m.File]++
+			}
 		}
+		return requeue
 	}
 
-	for _, p := range pending {
-		m, sites, cands := e.matchAnchored(p.origin, p.field, p.attr, anchor)
-		e.apply(p.ref, m, sites, cands)
+	if requeue := runPending(pending, anchor, false); len(requeue) > 0 {
+		retryAnchor := anchor
+		if retryAnchor == "" {
+			retryAnchor = majorityFile(votes, 2)
+		}
+		runPending(requeue, retryAnchor, true)
 	}
+
+	// the anchor is the file this resource's schema demonstrably lives in - surface it,
+	// since wrapper-based providers (azurerm's typed internal/sdk resources, aws's
+	// interceptors) report a shared wrapper file for their CRUD refs
+	if anchor == "" {
+		anchor = majorityFile(votes, 2)
+	}
+	if anchor != "" {
+		rr["detected_file"] = anchor
+	}
+}
+
+// majorityFile returns the most-voted file, or "" when the winner has fewer than
+// minVotes; ties break lexically for determinism.
+func majorityFile(votes map[string]int, minVotes int) string {
+	file, best := "", 0
+	for f, n := range votes {
+		if n > best || (n == best && (file == "" || f < file)) {
+			file, best = f, n
+		}
+	}
+	if best < minVotes {
+		return ""
+	}
+	return file
 }
 
 // apply attaches the match result to the ref and updates stats.
@@ -254,9 +332,22 @@ func (e *enricher) matchAnchored(origin, wantField, attrName, anchor string) (m 
 	}
 	callee := elems[len(elems)-1]
 
-	// anchored tiers: the resource's own file, then its directory; a final global tier
-	// requires an exact attribute-key match (a distinctive attribute name pins the call
-	// even when the resource produced no anchor at all)
+	// pools, most-specific first: the constructor's own name; the shared-helper name
+	// when the origin chain has one (aws's schema.StringLenBetweenSchema.StringLenBetween
+	// - the resource-site helper call carries the literals); any call qualified by the
+	// origin's package (generic helpers whose callee name the runtime erased)
+	pools := [][]*callSite{e.ix.byCallee[callee]}
+	if len(elems) >= 2 {
+		pools = append(pools, e.ix.byCallee[elems[len(elems)-2]])
+	}
+	pools = append(pools, e.ix.byQual[pkgBase(pkgPath)])
+
+	return e.matchTiers(pools, wantField, attrName, anchor)
+}
+
+// matchTiers narrows each pool through the anchored tiers (resource file, its
+// directory, then attr-exact globally) until a pool yields a match or candidates.
+func (e *enricher) matchTiers(pools [][]*callSite, wantField, attrName, anchor string) (m *callSite, sites int, cands []*callSite) {
 	var tiers []func(*callSite) bool
 	if anchor != "" {
 		dir := anchor[:strings.LastIndex(anchor, "/")+1]
@@ -270,7 +361,7 @@ func (e *enricher) matchAnchored(origin, wantField, attrName, anchor string) (m 
 		tiers = append(tiers, func(cs *callSite) bool { return cs.AttrKey == attrName })
 	}
 
-	for _, pool := range [][]*callSite{e.ix.byCallee[callee], e.ix.byQual[pkgBase(pkgPath)]} {
+	for _, pool := range pools {
 		for i, keep := range tiers {
 			c := filterSites(pool, keep)
 
@@ -294,9 +385,29 @@ func (e *enricher) matchAnchored(origin, wantField, attrName, anchor string) (m 
 	return nil, 0, nil
 }
 
+// argsAllExpr reports whether every arg is an unresolved source expression - the
+// signature of a call inside a helper whose real values come from its own callers.
+func argsAllExpr(args []any) bool {
+	if len(args) == 0 {
+		return false
+	}
+	for _, a := range args {
+		m, ok := a.(map[string]any)
+		if !ok {
+			return false
+		}
+		if _, ok := m["expr"]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func fieldTieBreak(c []*callSite, wantField string) []*callSite {
 	if len(c) > 1 && wantField != "" {
-		if sub := filterSites(c, func(cs *callSite) bool { return cs.Field == wantField || cs.Field == "return" }); len(sub) > 0 {
+		if sub := filterSites(c, func(cs *callSite) bool {
+			return cs.Field == wantField || cs.Field == "return" || cs.Field == "attr_value"
+		}); len(sub) > 0 {
 			c = sub
 		}
 	}

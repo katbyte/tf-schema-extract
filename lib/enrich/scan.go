@@ -224,6 +224,12 @@ func (ix *index) scanFile(path string) {
 				}
 			}
 		}
+		// a call that IS an attribute's value ("name": schemaHelper(1, 2048)) is a
+		// schema-builder invocation - the literals for shared-helper validators live
+		// here, so index it under the attribute key
+		if field == "" && attrKey != "" {
+			field = "attr_value"
+		}
 		if field == "" {
 			return true // not in a schema-relevant position, keep the index small
 		}

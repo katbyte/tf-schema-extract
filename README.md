@@ -74,7 +74,8 @@ unless noted; "—" means the mode cannot see that fact at all.
 | resource identity schemas | 172 | 172 | 172 |
 | attributes with ForceNew | — | 5347 | 5347 |
 | attributes with validators | — | 12322 | 12322 |
-| └ literal args recovered | — | — | 3802 + 299 candidate |
+| └ literal args recovered | — | — | 4089 + 323 candidate |
+| resources with detected_file | — | — | 730 (incl. 286 of 426 typed) |
 | defaults / constraint groups / diff-suppress | — | 2436 / 1397 / 802 | 2436 / 1397 / 802 |
 | CRUD funcs with file:line | — | 1103 | 1103 |
 
@@ -94,7 +95,7 @@ schema), so for azurerm the schema alone is a poor documentation source in every
 | resource identity schemas | 463 | 292 sdkv2 + 171 fw = 463 | 463 |
 | attributes with ForceNew | — | 4672 sdkv2 + 1293 fw | 5965 |
 | attributes with validators (sdkv2) | — | 58433 | 58433 |
-| └ literal args / enum type params recovered | — | — | 42136 + 4888 candidate |
+| └ literal args / enum type params recovered | — | — | 42263 + 4983 candidate |
 | framework attrs with validators (described) | — | 1522 | 1522 |
 | defaults / constraint groups / diff-suppress (sdkv2) | — | 2980 / 1103 / 720 | 2980 / 1103 / 720 |
 | CRUD funcs with file:line | — | 1240 | 1240 |
@@ -176,7 +177,15 @@ Two provider patterns need extra machinery, both discovered via aws:
   confident wrong answers. Each resource's caller-scoped matches vote for its anchor
   file (CRUD refs can't be used — aws routes every resource through one shared
   interceptor), and anchor-less refs are matched in that file, then its directory, then
-  globally only on an exact attribute-name hit.
+  globally only on an exact attribute-name hit. The winning anchor is emitted as the
+  resource's `detected_file` — recovering the implementation file for resources whose
+  CRUD refs point at a wrapper (azurerm's typed `internal/sdk` resources, aws's
+  interceptors).
+- **Shared schema helpers.** aws often makes a helper call the whole attribute
+  (`"name": sdkv2schema.StringLenBetweenSchema(1, 2048)`), so the scanner also indexes
+  calls in attribute-value position, and a match whose args are just the helper's own
+  parameters is *promoted* to the resource-site helper call — which is where the
+  literals actually live.
 
 (Naming honesty: the current pass is AST-based call-site analysis, not full SSA
 value-tracing — the flag is named for where it's headed. Constants like
@@ -253,8 +262,13 @@ make proto    # regenerate the tfplugin5/tfplugin6 stubs from terraform-plugin-g
 
 ## limitations / future work
 
-- azurerm's typed (`internal/sdk`) resources report wrapper functions for CRUD; their
-  schemas are still fully captured.
+- resources registered through wrappers (azurerm's 426 typed `internal/sdk` resources,
+  every aws resource) report the wrapper for their CRUD func refs; schemas are still
+  fully captured, and `--ssa` recovers the real implementation file as `detected_file`
+  where the schema's call sites identify it.
+- attributes built from a shared schema value reused across many attributes (aws's
+  quicksight pattern) are statically indistinguishable per-attribute; their args stay
+  as the helper's parameter `expr`s pending true SSA value-tracing.
 - `--ssa` resolves external packages via the provider's `vendor/` directory; providers
   that don't vendor lose the call sites living in dependencies (they count as
   unlocated).

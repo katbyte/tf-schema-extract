@@ -155,8 +155,8 @@ ambiguous matches list "call_candidates" instead.`,
 				}
 				payload = enriched
 
-				cout.Printf("    <yellow>%d</> constructor-built funcs: args recovered for <green>%d</> <gray>(+%d via identical sites)</>, <yellow>%d</> ambiguous, <red>%d</> unlocated <gray>(%d files scanned)</>\n",
-					stats.Refs, stats.Matched, stats.MatchedSame, stats.Ambiguous, stats.Unlocated, stats.FilesScanned)
+				cout.Printf("    <yellow>%d</> constructor-built funcs: args recovered for <green>%d</> <gray>(+%d via identical sites, %d via helper-call promotion)</>, <yellow>%d</> ambiguous, <red>%d</> unlocated <gray>(%d files scanned)</>\n",
+					stats.Refs, stats.Matched, stats.MatchedSame, stats.Promoted, stats.Ambiguous, stats.Unlocated, stats.FilesScanned)
 			}
 
 			out := &schemajson.Dump{
