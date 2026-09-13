@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/katbyte/tfschemaex/lib/clog"
+	"github.com/katbyte/go-kt/clog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -66,8 +66,7 @@ func configureFlags(root *cobra.Command) error {
 	viper.AddConfigPath(".")
 
 	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok {
 			clog.Log.Errorf("Error reading config file: %v", err)
 		}
 	}

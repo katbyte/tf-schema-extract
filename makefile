@@ -19,11 +19,11 @@ help: ## Show this help
 ##@ Build
 build: ## Compile tfschemaex with version info from git
 	@echo "==> building..."
-	go build -ldflags "-X github.com/katbyte/tfschemaex/lib/version.GitCommit=${GIT_COMMIT} -X github.com/katbyte/tfschemaex/lib/version.Version=${GIT_VERSION}"
+	go build -ldflags "-X github.com/katbyte/go-kt/version.GitCommit=${GIT_COMMIT} -X github.com/katbyte/go-kt/version.Version=${GIT_VERSION}"
 
 install: ## Install tfschemaex into GOPATH/bin with version info from git
 	@echo "==> installing..."
-	go install -ldflags "-X github.com/katbyte/tfschemaex/lib/version.GitCommit=${GIT_COMMIT} -X github.com/katbyte/tfschemaex/lib/version.Version=${GIT_VERSION}" .
+	go install -ldflags "-X github.com/katbyte/go-kt/version.GitCommit=${GIT_COMMIT} -X github.com/katbyte/go-kt/version.Version=${GIT_VERSION}" .
 
 tools: ## Install the tools required for development (golangci-lint, protoc plugins)
 	@echo "==> installing required tooling..."

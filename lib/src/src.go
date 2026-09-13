@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/katbyte/tfschemaex/lib/cout"
+	"github.com/katbyte/go-kt/cout"
 	"golang.org/x/mod/modfile"
 )
 

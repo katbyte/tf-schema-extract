@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/katbyte/tfschemaex/lib/cout"
+	"github.com/katbyte/go-kt/cout"
+	"github.com/katbyte/go-kt/version"
 	"github.com/katbyte/tfschemaex/lib/enrich"
 	"github.com/katbyte/tfschemaex/lib/plugin"
 	"github.com/katbyte/tfschemaex/lib/schemajson"
 	"github.com/katbyte/tfschemaex/lib/src"
-	"github.com/katbyte/tfschemaex/lib/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
