@@ -6,7 +6,7 @@ require (
 	github.com/gookit/color v1.6.1
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.8.0
-	github.com/katbyte/go-kt v0.1.0
+	github.com/katbyte/go-kt v0.6.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/mod v0.38.0
