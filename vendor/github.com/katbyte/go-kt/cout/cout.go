@@ -1,47 +1,38 @@
-// Package cout provides verbosity-levelled, coloured console output for
-// command-line tools.
-//
-// Tools separate what they *log* (clog, stderr, for diagnosing the tool) from
-// what they *print* (this package, for the person running it). Every print
-// call carries a minimum verbosity so a --quiet or --verbose flag is honoured
-// in one place, and colour tags such as <red>...</> are rendered by
-// gookit/color, which strips them when stdout is not a colour terminal.
-//
-// Tags are rendered anywhere in the final string, arguments included, so
-// helpers may build coloured fragments and pass them through %s.
+// Package cout prints for the person running a tool, as clog logs for whoever diagnoses it. Every call carries a least verbosity, so --quiet and
+// --verbose are honoured in one place, and colour tags such as <red>...</> render anywhere in the output and strip on a plain terminal.
 package cout
 
 import (
 	"io"
 	"os"
 
-	c "github.com/gookit/color"
+	"github.com/gookit/color"
 )
 
-// Verbosity is how much a tool prints. The levels are ordered, so "print at
-// Normal and above" is a plain comparison.
+// Verbosity is how much a tool prints, ordered so "Normal and above" is a comparison.
 type Verbosity int
 
 // The verbosity levels, from least to most output.
 const (
-	// VerbositySilent prints nothing at all, not even errors. For callers that
-	// only want the exit code.
+	// VerbositySilent prints nothing, not even errors: only the exit code.
 	VerbositySilent Verbosity = iota
-	// VerbosityQuiet prints only the minimal machine-readable lines (Quietf,
-	// QuietOnlyf) and errors.
+	// VerbosityJSON keeps stdout for a JSON document the tool writes itself; errors still go to Err.
+	VerbosityJSON
+	// VerbosityQuiet prints only the lines a script parses (Quietf, QuietOnlyf) and errors.
 	VerbosityQuiet
 	// VerbosityNormal is the default: everything a person wants to see.
 	VerbosityNormal
-	// VerbosityVerbose adds the detail behind Verbosef, typically -v.
+	// VerbosityVerbose adds the detail behind Verbosef, -v.
 	VerbosityVerbose
 )
 
-// String returns the level's name in lower case, matching the flag that
-// usually selects it.
+// String is the level's name, as the flag that selects it is spelled.
 func (v Verbosity) String() string {
 	switch v {
 	case VerbositySilent:
 		return "silent"
+	case VerbosityJSON:
+		return "json"
 	case VerbosityQuiet:
 		return "quiet"
 	case VerbosityNormal:
@@ -53,22 +44,17 @@ func (v Verbosity) String() string {
 	}
 }
 
-// Level controls the output verbosity. Tools set it once from their flags
-// before any output call; it is a plain variable rather than a setter so the
-// cobra flag-handling block in every tool stays a one-line assignment.
+// Level is the verbosity, set once from the flags before any output.
 var Level = VerbosityNormal
 
-// Out is where normal output goes. It defaults to stdout; tools whose stdout is
-// a data channel (a JSON emitter, an MCP server on stdio) point it at stderr so
-// progress messages never corrupt the stream.
+// Out is where normal output goes, stdout unless changed. A tool whose stdout carries its real output, a JSON document or an MCP session, points this
+// at stderr so progress lines stay out of it.
 var Out io.Writer = os.Stdout
 
-// Err is where Errorf writes. It defaults to stderr and is separate from Out so
-// errors stay visible when Out is redirected or discarded.
+// Err is where Errorf writes, stderr, apart from Out so errors stay visible when Out is redirected.
 var Err io.Writer = os.Stderr
 
-// printer snapshots the package state so each call reads the globals once and
-// so the behaviour can be tested in parallel without touching them.
+// printer is the package state read once per call, so tests can run in parallel without touching the globals.
 type printer struct {
 	level Verbosity
 	out   io.Writer
@@ -79,9 +65,7 @@ func current() printer {
 	return printer{level: Level, out: Out, err: Err}
 }
 
-// Writer returns Out when Level is Normal or above and io.Discard below, for
-// code that streams output through something else (a tabwriter, an encoder)
-// and cannot go through Printf.
+// Writer is Out at Normal and above and io.Discard below, for output that streams through a tabwriter or an encoder.
 func Writer() io.Writer {
 	return current().writer()
 }
@@ -93,61 +77,51 @@ func (p printer) writer() io.Writer {
 	return p.out
 }
 
-// Sprintf formats like fmt.Sprintf and renders colour tags in the result. Use
-// it to build coloured fragments that are later passed to Printf and friends,
-// or to colour text destined for somewhere other than Out.
+// Sprintf formats and renders colour tags, for a coloured fragment to pass on or print elsewhere.
 func Sprintf(format string, args ...any) string {
-	return c.Sprintf(format, args...)
+	return color.Sprintf(format, args...)
 }
 
-// Printf prints normal output; suppressed in quiet and silent modes. Console
-// write failures are not actionable, so they are dropped.
+// Printf prints normal output, nothing in quiet or silent modes.
 func Printf(format string, args ...any) {
 	current().printf(VerbosityNormal, format, args...)
 }
 
-// Println prints normal output followed by a newline, rendering colour tags in
-// its arguments; suppressed in quiet and silent modes.
+// Println prints normal output and a newline, nothing in quiet or silent modes.
 func Println(args ...any) {
 	p := current()
 	if p.level < VerbosityNormal {
 		return
 	}
-	c.Fprintln(p.out, args...)
+	color.Fprintln(p.out, args...)
 }
 
-// Verbosef prints detail that only matters when someone asked for it with -v;
-// suppressed at Normal and below.
+// Verbosef prints detail only asked for with -v.
 func Verbosef(format string, args ...any) {
 	current().printf(VerbosityVerbose, format, args...)
 }
 
-// Quietf prints in quiet mode and above. Use it for the one line a script
-// would parse, which should also appear in normal output alongside any
-// decoration Printf adds around it.
+// Quietf prints in quiet mode and above: the one line a script parses, which normal output shows too.
 func Quietf(format string, args ...any) {
 	current().printf(VerbosityQuiet, format, args...)
 }
 
-// QuietOnlyf prints only in quiet mode. Use it when quiet mode has its own
-// terse format for a line that normal mode prints differently via Printf, so
-// the two never appear together.
+// QuietOnlyf prints only in quiet mode, for a line normal mode prints another way.
 func QuietOnlyf(format string, args ...any) {
 	p := current()
 	if p.level != VerbosityQuiet {
 		return
 	}
-	c.Fprintf(p.out, format, args...)
+	color.Fprintf(p.out, format, args...)
 }
 
-// Errorf prints an error to Err in every mode except silent, so failures stay
-// visible even when Out is machine-readable (quiet) or suppressed.
+// Errorf prints an error to Err in every mode but silent.
 func Errorf(format string, args ...any) {
 	p := current()
 	if p.level == VerbositySilent {
 		return
 	}
-	c.Fprintf(p.err, format, args...)
+	color.Fprintf(p.err, format, args...)
 }
 
 // printf writes to out when the level is at least minimum.
@@ -155,5 +129,5 @@ func (p printer) printf(minimum Verbosity, format string, args ...any) {
 	if p.level < minimum {
 		return
 	}
-	c.Fprintf(p.out, format, args...)
+	color.Fprintf(p.out, format, args...)
 }
