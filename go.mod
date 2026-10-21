@@ -3,7 +3,7 @@ module github.com/katbyte/tfschemaex
 go 1.26.6
 
 require (
-	github.com/gookit/color v1.6.1
+	github.com/gookit/color v1.6.3
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/katbyte/go-kt v0.1.0

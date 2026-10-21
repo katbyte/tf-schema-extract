@@ -12,7 +12,7 @@ github.com/go-viper/mapstructure/v2/internal/errors
 # github.com/golang/protobuf v1.5.4
 ## explicit; go 1.17
 github.com/golang/protobuf/ptypes/empty
-# github.com/gookit/color v1.6.1
+# github.com/gookit/color v1.6.3
 ## explicit; go 1.18
 github.com/gookit/color
 # github.com/hashicorp/go-hclog v1.6.3
